@@ -1,0 +1,113 @@
+## Instalar Docker 
+siose@siose-windows:~$ sudo apt-get update
+siose@siose-windows:~$ sudo apt-get install apt-transport-https ca-certificates cur gnupg-agent software-properties-common
+siose@siose-windows:~$ curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+siose@siose-windows:~$ sudo apt-key fingerprint 0EBFCD88
+siose@siose-windows:~$ sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+siose@siose-windows:~$ sudo apt-get update
+siose@siose-windows:~$ sudo apt-get install docker-ce docker-ce-cli containerd.io
+siose@siose-windows:~$ sudo docker run hello-world
+siose@siose-windows:~$ sudo groupadd docker
+siose@siose-windows:~$ sudo usermod -aG docker $USER
+siose@siose-windows:~$ exit
+## Reiniciar el equipo
+
+## Instalar cifs-utils.
+siose@siose-windows:~$ sudo apt-get install cifs-utils
+
+## Añadir la carpeta del servidor NAS (nasgeomatica). 
+siose@SIOSE4:~$ sudo mount -v -t cifs //172.16.224.246/siose /home/siose/nasgeomatica/ -o user=siose,password=******,workgroup=workgroup,gid=1000,uid=1000,vers=1.0
+
+## Crear contenedor
+siose@SIOSE4:~$ docker run -d --name barcelona -p 127.0.0.1:5439:5432 mdillon/postgis:11-alpine 
+
+## Crear base de datos
+siose@SIOSE4:~$ docker exec -it barcelona psql -U postgres -c "CREATE DATABASE barcelonadb;"
+
+## Crear extensión PostGis
+siose@SIOSE4:~$ docker exec -it barcelona psql -U postgres -d barcelonadb -c "CREATE EXTENSION postgis;"
+
+## Lanzar la imagen de GDAL
+siose@siose-windows:~$ cd ~/docker-images/gdal/2.4.1
+siose@siose-windows:cd ~/docker-images/gdal/2.4.1$ time docker load < docker-image.tar.gz
+
+## Nombre de la imagen obtenida: siose-innova/gdal:2.4.1
+
+## Construcción del fichero de volcado sql para el grid lidar 
+siose@SIOSE4:~$ docker run --rm -it -v /home/siose/data/barcelona:/data siose-innova/gdal:2.4.1 ogr2ogr --config PG_USE_COPY YES -nln grid -f PGDump /data/cuad_lidar/2_Cobertura.sql /data/cuad_lidar/2_Cobertura.shp
+
+## Construcción del fichero de volcado sql para la provincia 
+siose@SIOSE4:~$ docker run --rm -it -v /home/siose/data/barcelona:/data siose-innova/gdal:2.4.1 ogr2ogr --config PG_USE_COPY YES -nlt PROMOTE_TO_MULTI -nln prov -where "TIPO_0101 = 'PROVINCIA'" -f PGDump /data/prov/BCN200_0101S_LIM_ADM.sql /data/prov/BCN200_0101S_LIM_ADM.shp
+
+## Copiar script .sql del home al contenedor
+siose@SIOSE4:~$ docker cp /home/siose/data/barcelona/cuad_lidar/2_Cobertura.sql barcelona:/var/lib/postgresql/data/.
+siose@SIOSE4:~$ docker cp /home/siose/data/barcelona/prov/BCN200_0101S_LIM_ADM.sql barcelona:/var/lib/postgresql/data/.
+
+## Ejecutar las sentencias del script.sql del contenedor a la BD
+siose@SIOSE4:~$ docker exec -it barcelona psql -U postgres -d barcelonadb -f /var/lib/postgresql/data/2_Cobertura.sql -f /var/lib/postgresql/data/BCN200_0101S_LIM_ADM.sql
+
+## Vista materializada de barce_grid
+CREATE MATERIALIZED VIEW barce_grid (id,geom) AS (
+WITH buffer (id, geom) AS (
+    SELECT 1, ST_Buffer (ST_Transform (wkb_geometry, 25831), 2000, 'quad_segs=14') FROM prov),
+    grid25831 (id, fotograma, geom) AS (	 
+    SELECT ogc_fid, fotograma, ST_Transform (wkb_geometry, 25831) FROM grid)
+SELECT row_number () over (),
+st_setsrid (st_multi (st_buffer (ST_Intersection (a.geom, b.geom), 0)), 25831)::geometry ('MultiPolygon',25831)
+FROM grid25831 a JOIN buffer b ON a.geom && b.geom
+where not st_isempty (st_buffer (ST_Intersection (a.geom, b.geom), 0)));
+
+## Tiempo de respuesta de la Vista materializada
+## (26.315 seg sin ‘quad_segs’)
+## (25.764 ‘quad_seg = 14’)
+
+## Vista materializada de buckets5
+CREATE MATERIALIZED view buckets5 (id,code,file_count,geom) AS(
+WITH
+centroids (id,geom) AS (
+	SELECT row_number () OVER (),
+	ST_PointOnSurface(geom)
+	FROM barce_grid),
+geocodes (code) AS (
+	SELECT st_geohash(st_transform(geom, 4326), 5) FROM centroids),
+geocodes_agg (code, file_count) AS (
+    SELECT code, count(code) FROM geocodes GROUP BY 1)
+SELECT row_number () over (),code, file_count, st_transform(st_setsrid(st_geomfromgeohash(code),4326),25831)::geometry ('Polygon',25831)
+FROM geocodes_agg);
+
+## Solución:
+## Crear nueve lotes a partir de los polígonos
+CREATE view lotes (num_intervalo, file_count, geom ) as(
+with
+bucketsmod (id, code , file_count , geom) AS(
+SELECT id, code, file_count + (id%23) , geom from buckets5),
+breaks (v) as (
+ select cdb_jenksbins(array_agg(file_count), 8 )::int[] from bucketsmod),
+intervalos (code, file_count, num_intervalo, geom ) as (
+select code, file_count, width_bucket(file_count::int,v),geom from bucketsmod, breaks)
+select num_intervalo , sum (file_count), st_union (geom)::geometry ('MultiPolygon',25831)
+from intervalos group by num_intervalo);
+
+## Construcción del fichero de volcado kml para lotes 
+siose@SIOSE4:~$ for i in {0..8}; do docker run --rm -it --network siose_net -v /home/siose/data/barcelona:/data siose-innova/gdal:2.4.1 ogr2ogr -f KML /data/lote${i}.kml PG:"host='barcelona' user='postgres' dbname='barcelonadb'" -sql "SELECT geom from lotes where num_intervalo =${i}";done
+## Instalar Java en Ubuntu: 
+siose@siose-windows:~$ cd opt
+siose@siose-windows:~/opt$ tar zxvf jdk-8u231-linux-x64.tar.gz
+siose@siose-windows:~/opt$ ls jdk1.8.0_231/bin/javaws
+siose@siose-windows:~$ sudo cp -R opt/jdk1.8.0_231 /opt/.
+
+## Descargar los lotes de LIDAR. En el CNIG, buscar por archivo, cargar el fichero “lote0.kml” y elegir el producto “LIDAR 2ª Cobertura (2015-Actualidad)”
+
+## Crear en el equipo local nueva carpeta /data/barcelona/datos_lidar (“lote0”), para guardar los ficheros de ese lote
+
+## Copiar el archivo “descarga_LIGW203869069.jnlp” de la carpeta Descargas a la carpeta /data/barcelona/datos_lidar/lote0
+
+## Empezar la descarga del lote0
+siose@siose-windows: ~/data/barcelona/datos_lidar/lote0$ /opt/jdk1.8.0_231/bin/javaws descarga_LIGW203869069.jnlp
+
+## Recopilación de ficheros LIDAR
+
+siose@SIOSE4:~$ cd ~/data/barcelona/datos_lidar
+siose@SIOSE4:~/data/barcelona/datos_lidar$ mkdir unificado
+siose@SIOSE4:~/data/barcelona/datos_lidar$ for d in lote*;  do rsync --progress --ignore-existing $d/*.laz   unificado/. ; done 
+siose@SIOSE4:~/data/barcelona/datos_lidar/unificado$ time rsync --progress * /home/siose/nasgeomatica/lidar/2016/barcelona/.
