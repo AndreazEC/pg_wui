@@ -1,0 +1,31 @@
+## Contenedor de almacenamiento de datos lidar 
+siose@SIOSE4:~$ docker run -d --network siose_net --name pointcloud -p 127.0.0.1:5439:5432 -v /home/siose/data:/data siose-innova/pointcloud:1.2.0
+
+## Crear base de datos
+siose@SIOSE4:~$ docker exec -it pointcloud psql -U postgres -c "CREATE DATABASE lidar_barce;"
+
+## Crear extensión PostGis - Point_Cloud 
+siose@SIOSE4:~$ docker exec -it pointcloud psql -U postgres -d lidar_barce -c "CREATE EXTENSION postgis;" -c "CREATE EXTENSION pointcloud;" -c "CREATE EXTENSION pointcloud_postgis;"
+
+#Lanzar la imagen postgresql
+siose@SIOSE4:~$  cd ~/docker-images/postgresql/11.3
+siose@SIOSE4:~/docker-images/postgresql/11.3$ time docker load < docker-image.tar.gz
+##Loaded image: siose-innova/postgresql:11.3
+
+#Ejecución del contenedor de cliente de PostgreSQL
+siose@SIOSE4:~$ docker run -it --rm -v $(pwd):/data/barcelona --network siose_net --entrypoint /bin/bash  siose-innova/postgresql:11.3
+
+# Actualización de librerías e instalación de parallel
+apk update
+apk add parallel
+
+# Cambio del directorio de trabajo 
+## Confirmar que se entre a la carpeta para correr el código
+cd data/barcelona
+
+#Creación de las tablas para archivos del huso 31
+bash-4.4# tail -n+2 h25_31.csv | cut -d "," -f 2 | sort | uniq | time parallel psql -h pointcloud -U postgres -d lidar_barce -c \"CREATE TABLE lidar{} \(id serial PRIMARY KEY, pa pcpatch\(1\), h25 smallint DEFAULT {} NOT NULL CHECK \(h25={}\)\)\"
+
+#Prueba con pipeline para insertar el esquema en la tabla de pointcloud_formats el valor (1) necesario para cumplir la definición del campo pa de las tablas lidar
+siose@SIOSE4:~$ time docker run -it --rm --network siose_net -v $(pwd):/data pdal/pdal:2.0 pdal pipeline /data/pipeline2.json --stage.input.filename=/data/barcelona/datos_lidar/lote0/PNOA_2016_CAT_396-4564_ORT-CLA-COL.laz --stage.output.connection="host=pointcloud
+dbname=lidar_barce user=postgres" --stage.output.table="pruebalaz"
