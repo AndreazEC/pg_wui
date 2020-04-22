@@ -1,0 +1,26 @@
+## Código para la obtención de los puntos de LiDAR para la evaluación del intermix:
+CREATE MATERIALIZED VIEW wui.intermix_points (id, id_polygon, geom, class) AS (
+WITH intermix_h25 AS (
+    SELECT a.id_polygon, a.geom, b.mtn25_class
+    FROM wui.intermix_polygons a JOIN hojas25k b ON a.geom && ST_Transform (b.geom, 4258)),
+intermix_patch(id_polygon, pa) AS (
+    SELECT a.id_polygon, pc_filterbetween(b.pa, 'Classification', 3, 7)
+    FROM intermix_h25 a JOIN lidar b ON pc_intersects(a.geom,b.pa)
+    WHERE a.mtn25_class=b.h25),
+intermix_pt (id_polygon, pt) AS (
+    SELECT id_polygon, pc_explode(pa)
+    FROM intermix_patch)
+SELECT row_number() over(), id_polygon,pt::geometry,pc_get(pt,'Classification')
+FROM intermix_pt);
+##Resultado: SELECT 93 683 267 (puntos de vegetación media, alta y edificación) Query returned successfully in  44 min 7 secs.
+
+## Reproyectar las VM a 25831 y en tablas:
+CREATE TABLE wui.intermix_points_25831 (id, id_polygon, geom, class) as (
+SELECT row_number() over (), id_polygon, ST_Transform (geom, 25831), class FROM intermix_points);
+##Resultado: SELECT 93 683 267 Query returned successfully in 4 min 2 secs.
+
+## Crear índice único para la columna id, índice espacial para geom e índice normal para id_polygon y class:
+CREATE UNIQUE INDEX ON intermix_points_25831 (id);
+CREATE INDEX ON intermix_points_25831 USING gist (geom);
+CREATE INDEX ON intermix_points_25831 (id_polygon, class);
+##Time: 7 min 15 secs.
