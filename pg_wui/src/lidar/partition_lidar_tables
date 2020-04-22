@@ -1,0 +1,20 @@
+##Abrir pdagmin 4 crear la tabla padre vacía
+CREATE TABLE lidar (
+    id int NOT NULL,
+    pa pcpatch(1),
+    h25 smallint NOT NULL
+) PARTITION BY LIST (h25);
+
+#Ejecución del contenedor de cliente de PostgreSQL
+siose@SIOSE4:~$ docker run -it --rm -v $(pwd):/data/barcelona --network siose_net --entrypoint /bin/bash  siose-innova/postgresql:11.3
+
+# Actualización de librerías e instalación de parallel
+apk update
+apk add parallel
+
+## Cambiar el directorio de trabajo 
+## Confirmar que se entre a la carpeta para correr el código
+cd data/barcelona
+
+##Creación de la partición 
+bash-4.4# tail -n+2 h25_31.csv | cut -d "," -f 2 | sort | uniq | time parallel psql -h pointcloud -U postgres -d lidar_barce -c \"ALTER TABLE lidar ATTACH PARTITION lidar{} FOR VALUES IN \({}\)\"
