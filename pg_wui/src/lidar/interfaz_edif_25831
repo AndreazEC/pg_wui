@@ -1,0 +1,36 @@
+## Código para la obtención de los puntos de edificaciones para la evaluación del
+interfaz a 100 m:
+CREATE MATERIALIZED VIEW pop_points (id, id_polygon, geom, class) AS (
+WITH pop (id_polygon, geom) AS(
+    SELECT a.pop_polygon, b.geom
+    FROM interface3 a NATURAL JOIN residentialpolygons b),
+pop_h25 (id_polygon, geom) AS (
+    SELECT a.id_polygon, a.geom, b.mtn25_class
+    FROM pop a JOIN hojas25k b ON a.geom && ST_Transform (b.geom, 4258) GROUP BY 1,2,3),
+pop_patch (id_polygon, pa) AS (
+    SELECT a.id_polygon, pc_filterequals(b.pa, 'Classification', 6)
+    FROM pop_h25 a JOIN lidar b ON pc_intersects(a.geom::geometry,b.pa)
+    WHERE a.mtn25_class=b.h25),
+pop_pt (id_polygon, pt) AS (
+    SELECT id_polygon, pc_explode(pa)
+    FROM pop_patch)
+SELECT row_number() over(), id_polygon,pt::geometry, pc_get(pt,
+'Classification')
+FROM pop_pt);
+
+Durante el proceso: 167 Gb disponibles, 218 Gb usados o 57% en uso
+  227 Gb disponibles, 157 Gb usados o 41% en uso
+
+Resultado: SELECT 80 197 805 
+         Query returned successfully in 8 hr 41 min.
+
+## Reproyectar al sr 25831
+CREATE TABLE wui.pop_points_25831 (id, id_polygon, geom, class) as (
+SELECT row_number() over (), id_polygon, ST_Transform (geom, 25831), class FROM wui.pop_points);
+##Resultado: SELECT 80197805 Query returned successfully in 3 min 12 secs.
+
+## Crear índice único para la columna id, índice espacial para geom e índice normal para id_polygon y class de pop_points:
+CREATE UNIQUE INDEX ON pop_points_25831 (id);
+CREATE INDEX ON pop_points_25831 USING gist (geom);
+CREATE INDEX ON pop_points_25831 (id_polygon, class);
+## Time: 2 hr aproximadamente.
