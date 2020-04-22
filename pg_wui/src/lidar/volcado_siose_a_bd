@@ -1,0 +1,11 @@
+## Restaurar el volcado de los polígonos SIOSE a la BD
+CREATE SCHEMA s2014;
+CREATE SCHEMA s2014_28;
+siose@SIOSE4:~$ time docker exec -it pointcloud pg_restore -d lidar_barce -U postgres -j3 -O -x /data/sql/dumps/dump2014_barcelona
+
+## Alterar el esquema original para colocar los datos de la provincia 
+ALTER TABLE s2014_08.t_valores SET SCHEMA s2014;
+ALTER TABLE s2014_08.t_poli_geo SET SCHEMA s2014;
+DROP SCHEMA s2014_08; -- Elimina el esquema intermedio
+VACUUM ANALYZE; --Libera espacio en disco para que utilice el mínimo posible (se ejecuta por separado)
+## Time: 14:22 min
