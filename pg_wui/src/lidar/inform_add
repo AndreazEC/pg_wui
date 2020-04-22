@@ -1,0 +1,37 @@
+## Polígonos de límites de los ficheros LIDAR
+## Ejecutar las sentencias del script.sql del contenedor a la BD
+siose@siose-windows:~$ docker exec -it pointcloud psql -U postgres -d lidar_barce -f data/barcelona/cuad_lidar/2_Cobertura.sql -f data/barcelona/prov/BCN200_0101S_LIM_ADM.sql -f data/barcelona/mtn25/cuadriculas/MTN25_ETRS89_Peninsula_Baleares_Canarias.sql
+
+## Vista materializada de barce_grid
+CREATE MATERIALIZED VIEW barce_grid (id, fotograma, geom) AS (
+WITH
+buffer (id, geom) AS (
+	SELECT 1, ST_Buffer (ST_Transform (wkb_geometry, 25831), 2000, 'quad_segs=14') FROM prov),
+grid25831 (id, fotograma, geom) AS (	 
+	SELECT ogc_fid, fotograma, ST_Transform (wkb_geometry, 25831) FROM grid)
+SELECT a.id, a.fotograma,
+   	st_setsrid (st_multi (st_buffer (ST_Intersection (a.geom, b.geom), 0)), 25831)::geometry('MultiPolygon',25831)
+FROM grid25831 a JOIN buffer b ON a.geom && b.geom
+where not st_isempty(st_buffer (ST_Intersection (a.geom, b.geom), 0)));
+
+## Tiempo de respuesta de la Vista materializada (24.798 quad_seg = 14’)
+
+## Vista materializada de hojas25k, de los polígonos mtn25 y los ficheros LIDAR que le corresponde a cada hoja: 
+CREATE MATERIALIZED VIEW hojas25k (id, fotograma, mtn25_class, geom) AS (
+WITH
+centroide (id, fotograma, geom_c, geom_p) AS (
+SELECT id, right (fotograma, strpos (reverse (fotograma), '/') - length (fotograma) - 1),
+       	ST_PointOnSurface(geom)::geometry('Point',25831), geom
+    	FROM barce_grid
+     	WHERE fotograma LIKE '%COL%'),
+grid_mtn25 (id, mtn25_clas, geom) AS (
+SELECT ogc_fid, replace(replace (replace(left (mtn25_clas,7),'-',''),'B',''),'/','')::smallint, ST_Transform (wkb_geometry, 25831)
+ 	FROM grid_mtn)
+SELECT row_number() over (), b.fotograma, a.mtn25_clas, b.geom_p
+FROM grid_mtn25 a JOIN centroide b ON a.geom && b.geom_c
+where not st_isempty (ST_Intersection (a.geom, b.geom_c)));
+
+## Crear indice único, índice espacial e índice normal para hojas25k:
+CREATE UNIQUE INDEX ON hojas25k (id);
+CREATE INDEX ON hojas25k USING gist (geom);
+CREATE INDEX ON hojas25k (mtn25_class);
