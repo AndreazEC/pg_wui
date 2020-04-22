@@ -1,0 +1,47 @@
+## Obtención de Imagen POINTCLOUD del NAS
+## Copiar la docker-image.tar.gz a la carpeta de docker.images/pointcloud/1.2.0/ del local → Descomprimir y desempaquetar la carpeta de la imagen pointcloud que está dentro de la carpeta docker-images de la carpeta local
+siose@SIOSE4:~$ cd ~/docker-images/pointcloud/1.2.0 
+time docker load < docker-image.tar.gz
+## Tiempo = 15,09 seg con nombre Loaded image: siose-innova/pointcloud:1.2.0
+
+##La carga de nubes de puntos en una base de datos PostgreSQL se realizó con apoyo del paquete PDAL, incluyó la instalación del módulo lazperf para poder trabajar con los archivos en formato comprimido LiDAR (LAZ).
+## Obtención de Imagen PDAL desde GitHub
+siose@SIOSE4:~$ docker pull pdal/pdal:2.0
+
+##Lanzar un contenedor de Postgres con PointCloud → crear BD “test” → Habilitar extensiones “postgis, pointcloud, pointcloud_postgis”
+##Contenedor test de Postgres con PointCloud
+siose@SIOSE4:~$ docker run -d --network siose_net --name test_pc -p 127.0.0.1:5439:5432 -v /home/siose/data:/data siose-innova/pointcloud:1.2.0
+
+## Crear base de datos
+siose@SIOSE4:~$ docker exec -it test_pc psql -U postgres -c "CREATE DATABASE test;"
+
+## Crear extensión PostGis - Point_Cloud Point_Cloud con PostGis
+siose@SIOSE4:~$ docker exec -it test_pc psql -U postgres -d test -c "CREATE EXTENSION postgis;" -c "CREATE EXTENSION pointcloud;" -c "CREATE EXTENSION pointcloud_postgis;"
+
+##Lanzar un contenedor iterativo para probar PDAL y ver el espacio almacenamiento utilizado → utilizar la herramienta “pipeline” → json8 para leer, procesar y escribir la información
+##Prueba 1: 
+##Contenedor PDAL
+siose@SIOSE4:~$ time docker run -it --rm --network siose_net -v $(pwd):/data pdal/pdal:2.0 time pdal pipeline /data/pipeline2.json --stage.input.filename=/data/barcelona/datos_lidar/lote0/PNOA_2016_CAT_396-4564_ORT-CLA-COL.laz --stage.output.connection="host=test_pc
+dbname=test user=postgres" --stage.output.table="pruebalaz"
+
+##Función para determinar el número de KB que esta almacenando la fila que más pesa
+SELECT pg_size_pretty (max (pg_column_size (pa)::numeric)) FROM pruebalaz;
+##Tamaño: 4,4MB → 1833 bytes
+
+## Consulta al catálogo para comprobar el # de páginas ocupadas por la tabla TOAST(Almacenamiento secundario) que está enlazada con la tabla de nube de puntos para almacenar patches que superen los 2Kb.
+
+SELECT relname, relpages
+FROM pg_class,
+ 	(SELECT reltoastrelid
+  	FROM pg_class
+  	WHERE relname = 'pruebalaz') AS ss
+WHERE oid = ss.reltoastrelid OR
+  	oid = (SELECT indexrelid
+         	FROM pg_index
+         	WHERE indrelid = ss.reltoastrelid)
+ORDER BY relname;
+
+##Resultado:
+##relname | relpages
+##pg_toast_”” | 0  → Muestra que no hay páginas en el almacenamiento secundario
+##pg_toast_””_index | 1
