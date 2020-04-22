@@ -1,0 +1,58 @@
+## Crear contenedor
+siose@SIOSE4:~$ docker run -d --name fichero_mtn25 -p 127.0.0.1:5439:5432 mdillon/postgis:11-alpine 
+
+## Crear base de datos
+siose@SIOSE4:~$ docker exec -it fichero_mtn25 psql -U postgres -c "CREATE DATABASE mtn25;"
+
+## Crear extensión PostGis
+siose@SIOSE4:~$ docker exec -it fichero_mtn25 psql -U postgres -d mtn25 -c "CREATE EXTENSION postgis;"
+
+## Construcción del fichero de volcado sql para el MTN25 
+siose@SIOSE4:~$ docker run --rm -it -v /home/siose/data/barcelona:/data siose-innova/gdal:2.4.1 
+ogr2ogr --config PG_USE_COPY YES -nln grid_mtn -f PGDump -a_srs EPSG:4258 /data/mtn25/cuadriculas/MTN25_ETRS89_Peninsula_Baleares_Canarias.sql /data/mtn25/cuadriculas/MTN25_ETRS89_Peninsula_Baleares_Canarias.shp
+
+## Copiar script .sql del home al contenedor
+siose@SIOSE4:~$ docker cp /home/siose/data/barcelona/cuad_lidar/2_Cobertura.sql fichero_mtn25:/var/lib/postgresql/data/.
+siose@SIOSE4:~$ docker cp /home/siose/data/barcelona/prov/BCN200_0101S_LIM_ADM.sql fichero_mtn25:/var/lib/postgresql/data/.
+siose@SIOSE4:~$ docker cp /home/siose/data/barcelona/mtn25/cuadriculas/MTN25_ETRS89_Peninsula_Baleares_Canarias.sql
+fichero_mtn25:/var/lib/postgresql/data/.
+
+## Ejecutar las sentencias del script.sql del contenedor a la BD
+siose@SIOSE4:~$ docker exec -it fichero_mtn25 psql -U postgres -d mtn25 -f /var/lib/postgresql/data/2_Cobertura.sql -f /var/lib/postgresql/data/BCN200_0101S_LIM_ADM.sql -f /var/lib/postgresql/data/MTN25_ETRS89_Peninsula_Baleares_Canarias.sql
+
+## Vista materializada de barce_grid
+CREATE MATERIALIZED VIEW barce_grid (id, fotograma, geom) AS (
+WITH
+buffer (id, geom) AS (
+	SELECT 1, ST_Buffer (ST_Transform (wkb_geometry, 25831), 2000, 'quad_segs=14') FROM prov),
+grid25831 (id, fotograma, geom) AS (	 
+	SELECT ogc_fid, fotograma, ST_Transform (wkb_geometry, 25831) FROM grid)
+SELECT a.id, a.fotograma,
+   	st_setsrid (st_multi (st_buffer (ST_Intersection (a.geom, b.geom), 0)), 25831)::geometry('MultiPolygon',25831)
+FROM grid25831 a JOIN buffer b ON a.geom && b.geom
+where not st_isempty(st_buffer (ST_Intersection (a.geom, b.geom), 0)));
+
+## Tiempo de respuesta de la Vista materializada: (24.798 quad_seg = 14’)
+
+##Creación de las hojas de partición geográfica
+CREATE MATERIALIZED VIEW mtn25_barce (fotograma, mtn25_class) AS (
+WITH
+centroide (id, fotograma, geom) AS (
+SELECT id, right (fotograma, strpos (reverse (fotograma), '/') - length (fotograma) - 1),
+	ST_PointOnSurface(geom)::geometry('Point',25831)
+	FROM barce_grid 
+WHERE fotograma LIKE '%COL%'),
+grid_mtn25 (id, mtn25_clas, geom) AS (
+	SELECT ogc_fid, replace(replace (replace(left (mtn25_clas,7),'-',''),'B',''),'/','')::smallint, ST_Transform (wkb_geometry, 25831)
+FROM grid_mtn)
+SELECT b.fotograma, a.mtn25_clas
+FROM grid_mtn25 a JOIN centroide b ON a.geom && b.geom
+where not st_isempty (ST_Intersection (a.geom, b.geom)));
+
+## Tiempo de respuesta de la Vista materializada(3,486seg)
+
+## Construcción del fichero de volcado .csv para las hojas MTN25
+siose@SIOSE4:~$ docker exec -it fichero_mtn25 psql -U postgres -d mtn25 -c "COPY (SELECT * FROM mtn25_barce) TO '/var/lib/postgresql/data/h25_31.csv' WITH (FORMAT csv, HEADER true);"
+
+## Copia del fichero a la carpeta deseada
+siose@SIOSE4:~$ docker cp fichero_mtn25:/var//lib/postgresql/data/h25_31.csv data/barcelona/.
