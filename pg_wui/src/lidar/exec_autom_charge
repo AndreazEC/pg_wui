@@ -1,0 +1,11 @@
+#Lanzar un contenedor interactivo conectado  a la red para el almacenamiento de los datos lidar utilizando la imagen de pdal 2.0
+siose@SIOSE4:~/data$ docker run -it --rm --network siose_net -v $(pwd):/data  pdal/pdal:2.0 /bin/bash
+
+# Actualización de librerías e instalación de parallel
+apt-get update
+apt-get install parallel time
+
+## Ejecución del proceso de carga masiva automatizada
+tail -n+2 data/h25_31.csv | time parallel --colsep "," pdal pipeline /data/pipeline2.json --stage.input.filename=\"/data/barcelona/datos_lidar/unificado/{1}\" --stage.output.connection=\"host=pointcloud dbname=lidar_barce user=postgres\" --stage.output.table=\"lidar{2}\"
+
+##Time: 2:27:48 BD Size:58.8 GB (Virtual: 59.5 GB) 
