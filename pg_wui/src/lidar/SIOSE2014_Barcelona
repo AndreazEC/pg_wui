@@ -1,0 +1,114 @@
+# Primero montar en la carpeta local la información del  servidor NAS
+siose@SIOSE4:~$ sudo mount -v -t cifs //172.16.224.246/siose /home/siose/nasgeomatica/ -o user=siose,password=******,workgroup=workgroup,gid=1000,uid=1000,vers=1.0
+
+# Copiar la mf2/2014/docker-image.tar.gz a la carpeta de docker_images en el equipo local
+
+# Descomprimir y desempaquetar la carpeta de la imagen SIOSE2014 que está dentro de la carpeta docker-images de la carpeta local
+siose@SIOSE4:~$ cd ~/docker-images/mf2/2014 
+time docker load < docker-image.tar.gz
+##Tiempo = 4:25 min con nombre Loaded image: siose-innova/mf2:2014
+
+# Lanzar contenedor para trabajar con PGAdmin4
+siose@SIOSE4:~/docker-images/mf2/2014$ docker run -d --name pgadmin4 -p 80:80 -e 'PGADMIN_DEFAULT_PASSWORD=postgres' -e 'PGADMIN_DEFAULT_EMAIL=user@domain.com' dpage/pgadmin4
+
+#Contenedor de BD SIOSE2014
+siose@SIOSE4:~$ docker run -d --name siose2014 -p 127.0.0.1:5439:5432 -v /home/siose/data/sql:/data siose-innova/mf2:2014
+
+#Crear red entre contenedores (SIOSE - PGAdmin4)
+siose@SIOSE4:~/docker-images/mf2/2014$ docker network create siose_net
+
+#Conectar a la red entre contenedores (SIOSE - PGAdmin4)
+siose@SIOSE4:~/docker-images/mf2/2014$ docker network connect siose_net siose2014
+siose@SIOSE4:~/docker-images/mf2/2014$ docker network connect siose_net pgadmin4
+
+#Crear esquema BASE
+siose@SIOSE4:~$ docker exec -it siose2014 psql -U postgres -d siose2014 -c "CREATE SCHEMA base;"
+
+#Inscribir un fichero de tipo UTF-8 al shp (Lenguaje común)
+siose@SIOSE4:~/data/barcelona/prov$ echo ISO-8859-1 > BCN200_0101S_LIM_ADM.cpg
+
+#Creación de esquema=base y srs=4258
+siose@SIOSE4:~/data$ docker run -it --rm -v $(pwd):/data --network siose_net siose-innova/gdal:2.4.1 ogr2ogr -f postgresql PG:"host=siose2014 dbname=siose2014 schemas=base user=postgres password=postgres" -nlt PROMOTE_TO_MULTI -a_srs EPSG:4258 -nln barcelona /data/barcelona/prov/BCN200_0101S_LIM_ADM.shp
+
+## Creación del esquema de destino
+CREATE SCHEMA s2014_08;
+
+## Creación de la tabla de recintos a partir de una consulta espacial
+CREATE TABLE s2014_08.t_poli_geo AS (
+WITH utm(geom) AS (
+	SELECT st_transform(wkb_geometry,25831) FROM base.barcelona
+	WHERE tipo_0101 LIKE 'PROVINCIA'),
+buffer(geom) AS (
+	SELECT st_transform(st_simplifypreservetopology(st_buffer(geom,200,'quad_segs=4'),25),4258) FROM utm)
+SELECT a.* FROM s2014.t_poli_geo a JOIN buffer b ON st_intersects (a.geom, b.geom));
+##Tiempo: 7seg  # de filas resultantes de la consulta: 73500 Table size: 145 MB
+
+## Creación de la tabla de valores
+CREATE TABLE s2014_08.t_valores AS (
+    SELECT * FROM s2014.t_valores
+    WHERE id_polygon= ANY (SELECT id_polygon FROM s2014_08.t_poli_geo)
+    );
+##Tiempo:6seg  # de filas resultantes de la consulta: 383352 Table size: 37 MB
+
+##Crear índices, tablas y claves primarias
+ALTER TABLE s2014_08.t_poli_geo ADD primary key (id_polygon);
+CREATE INDEX ON s2014_08.t_poli_geo USING gist (geom);
+CREATE INDEX ON s2014_08.t_valores (id_polygon);
+CREATE INDEX ON s2014_08.t_valores (id_coberturas);
+CREATE INDEX ON s2014_08.t_valores (atributos);
+CREATE INDEX ON s2014_08.t_valores (superf_ha);
+ALTER TABLE s2014_08.t_valores ADD foreign key (id_coberturas) REFERENCES s2014.tc_siose_coberturas(id_coberturas) ON UPDATE cascade;
+ALTER TABLE s2014_08.t_valores ADD foreign key (id_polygon) REFERENCES s2014_08.t_poli_geo(id_polygon) ON UPDATE cascade;
+##Tiempo: 4 secs 24 msec
+
+##Crear nueva carpeta para el volcado de los datos del SIOSE de la provincia (Nótese que se debe colocar en la carpeta que tenga asignado el volumen de la BD postgres)
+siose@SIOSE4:~$ mkdir data/sql/dumps/dump2014_barcelona
+
+##Volcado de polígonos SIOSE2014 de la provincia
+siose@SIOSE4:~$ time docker exec -it siose2014 pg_dump -d siose2014 -U postgres -Fd -j3 -O -t s2014.tc_siose_coberturas -t s2014.tc_siose_atributos -t s2014_08.t_poli_geo -t s2014_08.t_valores -x -f /data/dumps/dump2014_barcelona
+
+##Carga de la imagen de postgis 2.5.2 a partir de un tar.gz
+cd ~/docker-images/postgis/2.5.2 
+time docker load < docker-image.tar.gz
+##Tiempo = 4:63 seg con nombre Loaded image: siose-innova/postgis:2.5.2, Tamaño: 50,1 MB
+
+##Contenedor de BD SIOSE_ 2014 de Barcelona --> Se crea un NC vacío para colocar el área de estudio
+siose@SIOSE4:~$ docker run -d --network siose_net --name siose2014_barcelona -p 127.0.0.1:5439:5432 -v /home/siose/data:/data siose-innova/postgis:2.5.2
+
+##Desde sql se crea la BD
+CREATE DATABASE siose2014;
+
+## Se cambia la conexión a la BD creada “siose2014” y se aplican los query desde pdadmin4
+CREATE EXTENSION postgis;
+CREATE SCHEMA s2014;
+CREATE SCHEMA s2014_08;
+
+## Restaurar el volcado a la BD
+siose@SIOSE4:~$ time docker exec -it siose2014_barcelona pg_restore -d siose2014 -U postgres -j3 -O -x /data/sql/dumps/dump2014_barcelona
+
+##Altera el esquema original para colocar los datos de la provincia 
+ALTER TABLE s2014_08.t_valores SET SCHEMA s2014;
+ALTER TABLE s2014_08.t_poli_geo SET SCHEMA s2014;
+DROP SCHEMA s2014_08; -- Elimina el esquema intermedio
+VACUUM ANALYZE; --Libera espacio en disco para que utilice el mínimo posible (se ejecuta por separado)
+
+##Empaquetar la imagen de la zona de trabajo
+siose@SIOSE4:~$ time docker commit --author natily_zb@hotmail.com --message "SIOSE MF2 2014 EPSG:4258 Provincia de Barcelona" siose2014_barcelona siose-innova/mf2-0908:2014
+sha256:ccb5e6d7d2774acacf7add7b49815691c12e286ce5d0a414f4a866e48d502abd
+
+##Pasos previos de prueba
+siose@SIOSE4:~$ docker rm -v siose2014
+siose@SIOSE4:~$ docker stop siose2014_barcelona
+siose@SIOSE4:~$ docker rename siose2014_barcelona barcelona
+
+#Se crea el Contenedor HITO 1
+siose@SIOSE4:~$ docker run -d --network siose_net --name siose2014_barcelona -p 127.0.0.1:5439:5432 -v /home/siose/data:/data siose-innova/mf2-0908:2014
+
+##Nombre de la imagen: siose-innova/mf2-0908   2014  Tamaño imagen: 869MB 
+
+##Eliminar contenedor innecesario
+siose@SIOSE4:~$ docker rm -v barcelona
+
+## Guardar la imagen en la carpeta deseada 
+docker save siose-innova/mf2-0908:2014 | gzip > docker-image.tar.gz
+md5sum docker-image.tar.gz > docker-image.md5
